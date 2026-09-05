@@ -9,5 +9,5 @@ pub mod tracer;
 pub use agent::Agent;
 pub use error::Error;
 pub use harness::Harness;
-pub use harness::HarnessBuilder;
+pub use harness::HarnessHarness;
 pub use retry::RetryPolicy;

@@ -18,7 +18,7 @@ pub struct Harness {
 }
 
 #[derive(Default)]
-pub struct HarnessBuilder {
+pub struct HarnessHarness {
     model: Option<Arc<dyn Model>>,
     instructions: Vec<String>,
     retry: RetryPolicy,
@@ -26,8 +26,8 @@ pub struct HarnessBuilder {
 }
 
 impl Harness {
-    pub fn builder() -> HarnessBuilder {
-        HarnessBuilder::default()
+    pub fn builder() -> HarnessHarness {
+        HarnessHarness::new()
     }
 
     pub fn spawn(&self) -> Agent {
@@ -46,7 +46,11 @@ impl Harness {
     }
 }
 
-impl HarnessBuilder {
+impl HarnessHarness {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn model(mut self, model: impl Model + 'static) -> Self {
         self.model = Some(Arc::new(model));
         self

@@ -1,10 +1,10 @@
 use harnessharness::Error;
-use harnessharness::Harness;
+use harnessharness::HarnessHarness;
 use harnessharness::model::provider::Anthropic;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let harness = Harness::builder()
+    let harness = HarnessHarness::new()
         .model(Anthropic::new("claude-haiku-4-5"))
         .instructions("you are a 'hello world' greeter agent")
         .build()?;

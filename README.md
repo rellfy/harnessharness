@@ -6,11 +6,11 @@ and spawn it into an agent that is ready to be deployed and prompted.
 
 ## Example
 ```rust
-let harness = Harness::builder()
+let harness = HarnessHarness::new()
     .model(OpenRouter::new("anthropic/claude-sonnet-4.5"))
     .instructions(include_str!("instructions.md"))
     .tools([read_file, write_file, bash, grep])
-    .subagent("explore", Harness::builder().tools([read_file, grep]).read_only())
+    .subagent("explore", HarnessHarness::new().tools([read_file, grep]).read_only())
     .policy(Policy::new()
         .allow(read_file)
         .allow(grep)

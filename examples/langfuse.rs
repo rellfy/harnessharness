@@ -1,5 +1,5 @@
 use harnessharness::Error;
-use harnessharness::Harness;
+use harnessharness::HarnessHarness;
 use harnessharness::model::provider::Anthropic;
 use harnessharness::tracer::provider::Langfuse;
 use tracing_subscriber::EnvFilter;
@@ -9,7 +9,7 @@ async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    let harness = Harness::builder()
+    let harness = HarnessHarness::new()
         .model(Anthropic::new("claude-haiku-4-5"))
         .instructions("you are a 'hello world' greeter agent")
         .tracer(Langfuse::from_env()?)
