@@ -13,3 +13,4 @@ In no specific order:
 12. Source code files should read in order of importance: high-level, public functions go at the top, and low-level, private util functions go at the bottom. Consts, statics and structs go at the top.
 13. Comments are an anti-pattern. Avoid them. Refer to #5.
 14. For Rust: `mod` declarations go above `use` declarations.
+15. Consts, structs, and definitions go at the top. Implementations, functions go at the bottom.
