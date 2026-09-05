@@ -5,7 +5,7 @@ We heard you like a harness, so we made a harness for your harness.
 ```rust
 let harness = Harness::builder()
     .model(OpenRouter::new("anthropic/claude-sonnet-4.5"))
-    .system(include_str!("system.md"))
+    .instructions(include_str!("instructions.md"))
     .tools([read_file, write_file, bash, grep])
     .subagent("explore", Harness::builder().tools([read_file, grep]).read_only())
     .policy(Policy::new()
