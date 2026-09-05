@@ -4,6 +4,7 @@ use crate::message::Role;
 use crate::model::Completion;
 use crate::model::CompletionRequest;
 use crate::model::Model;
+use crate::model::Usage;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
@@ -43,6 +44,13 @@ struct MessageParam<'a> {
 #[derive(Deserialize)]
 struct MessagesResponse {
     content: Vec<ContentBlock>,
+    usage: UsageResponse,
+}
+
+#[derive(Deserialize)]
+struct UsageResponse {
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +91,10 @@ impl Anthropic {
 
 #[async_trait]
 impl Model for Anthropic {
+    fn name(&self) -> &str {
+        &self.model
+    }
+
     async fn complete(&self, request: CompletionRequest<'_>) -> Result<Completion, Error> {
         let api_key = self.api_key.as_deref().ok_or(Error::MissingApiKey {
             provider: PROVIDER_NAME,
@@ -139,6 +151,10 @@ impl<'a> From<&'a Message> for MessageParam<'a> {
 }
 
 fn parse_completion(response: MessagesResponse) -> Result<Completion, Error> {
+    let usage = Usage {
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+    };
     let text = response
         .content
         .into_iter()
@@ -150,6 +166,6 @@ fn parse_completion(response: MessagesResponse) -> Result<Completion, Error> {
         .join("");
     match text.is_empty() {
         true => Err(Error::EmptyResponse),
-        false => Ok(Completion { text }),
+        false => Ok(Completion { text, usage }),
     }
 }

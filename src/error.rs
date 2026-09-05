@@ -11,6 +11,8 @@ pub enum Error {
         provider: &'static str,
         env_var: &'static str,
     },
+    #[error("missing environment variable `{0}`")]
+    MissingEnvVar(&'static str),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("provider `{provider}` returned status {status}: {body}")]
@@ -21,6 +23,8 @@ pub enum Error {
     },
     #[error("provider returned no text content")]
     EmptyResponse,
+    #[error("tracer error: {0}")]
+    Tracer(String),
 }
 
 impl Error {
@@ -28,7 +32,11 @@ impl Error {
         match self {
             Error::Http(error) => error.is_timeout() || error.is_connect() || error.is_body(),
             Error::Provider { status, .. } => *status >= 500 || RETRYABLE_STATUSES.contains(status),
-            Error::MissingModel | Error::MissingApiKey { .. } | Error::EmptyResponse => false,
+            Error::MissingModel
+            | Error::MissingApiKey { .. }
+            | Error::MissingEnvVar(_)
+            | Error::EmptyResponse
+            | Error::Tracer(_) => false,
         }
     }
 }
