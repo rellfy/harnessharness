@@ -2,6 +2,7 @@ use crate::error::Error;
 use crate::harness::Harness;
 use crate::message::Message;
 use crate::model::CompletionRequest;
+use crate::retry::retry;
 
 pub struct Agent {
     harness: Harness,
@@ -22,7 +23,10 @@ impl Agent {
             instructions: &self.harness.instructions,
             messages: &self.messages,
         };
-        let completion = self.harness.model.complete(request).await?;
+        let completion = retry(&self.harness.retry, || {
+            self.harness.model.complete(request.clone())
+        })
+        .await?;
         self.messages.push(Message::assistant(&completion.text));
         Ok(completion.text)
     }
