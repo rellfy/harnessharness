@@ -31,19 +31,3 @@ let harness = HarnessHarness::new()
 
 harness.run_interactive(Terminal).await?;
 ```
-
-## Sessions
-The harness holds the session store; each agent owns one session. `spawn` starts
-a fresh session and `resume` reloads an existing one from the store. Every
-message an agent sends or receives is persisted as it happens.
-
-```rust
-let mut agent = harness.spawn();
-let session_id = agent.id().to_string();
-agent.prompt("my name is Ferris").await?;
-
-let mut agent = harness.resume(session_id).await?;
-agent.prompt("what is my name?").await?;
-```
-
-See `examples/session.rs`.
