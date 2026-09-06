@@ -2,11 +2,13 @@
 name = "harnessharness"
 version = "0.1.0"
 edition = "2024"
-description = "A library to build agent harnesses declaratively"
+description = "Declarative builder for AI agent harnesses"
 license = "Apache-2.0"
 repository = "https://github.com/rellfy/harnessharness"
 readme = "README.md"
 exclude = [".github", "CLAUDE.md", "AGENTS.md", "CODE_STYLE_GUIDE.md"]
+keywords = ["ai", "llm", "agent", "harness"]
+categories = ["api-bindings"]
 
 [features]
 default = ["langfuse", "sqlite"]
