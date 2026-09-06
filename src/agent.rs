@@ -14,31 +14,36 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(harness: Harness) -> Self {
+        Self::restore(harness, Uuid::now_v7().to_string(), Vec::new())
+    }
+
+    pub fn restore(harness: Harness, id: String, messages: Vec<Message>) -> Self {
         Self {
-            id: Uuid::now_v7().to_string(),
+            id,
             harness,
-            messages: Vec::new(),
+            messages,
         }
     }
 
     pub async fn prompt(&mut self, input: impl Into<String>) -> Result<String, Error> {
         let input = input.into();
-        let tracer = &self.harness.tracer;
-        let model = &self.harness.model;
-        let span = AgentSpan::start(tracer, "prompt", &self.id, &input);
-        self.messages.push(Message::user(input));
+        let tracer = self.harness.tracer.clone();
+        let model = self.harness.model.clone();
+        let span = AgentSpan::start(&tracer, "prompt", &self.id, &input);
+        self.push_message(Message::user(input)).await?;
         let request = CompletionRequest {
             instructions: &self.harness.instructions,
             messages: &self.messages,
         };
         let result = retry(&self.harness.retry, || async {
-            let generation = span.generation(tracer, model.name(), &request);
+            let generation = span.generation(&tracer, model.name(), &request);
             let completion_result = model.complete(request.clone()).await;
             generation.end(completion_result)
         })
         .await;
         let completion = span.end(result)?;
-        self.messages.push(Message::assistant(&completion.text));
+        self.push_message(Message::assistant(&completion.text))
+            .await?;
         Ok(completion.text)
     }
 
@@ -48,5 +53,13 @@ impl Agent {
 
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    async fn push_message(&mut self, message: Message) -> Result<(), Error> {
+        if let Some(session_store) = &self.harness.session_store {
+            session_store.append(&self.id, &message).await?;
+        }
+        self.messages.push(message);
+        Ok(())
     }
 }

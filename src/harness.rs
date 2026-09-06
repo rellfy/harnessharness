@@ -2,6 +2,7 @@ use crate::agent::Agent;
 use crate::error::Error;
 use crate::model::Model;
 use crate::retry::RetryPolicy;
+use crate::session::SessionStore;
 use crate::tracer::TRACER_NAME;
 use crate::tracer::Tracer;
 use opentelemetry::global;
@@ -14,6 +15,7 @@ pub struct Harness {
     pub(crate) instructions: Arc<str>,
     pub(crate) retry: RetryPolicy,
     pub(crate) tracer: Arc<BoxedTracer>,
+    pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     tracer_provider: Option<Arc<dyn Tracer>>,
 }
 
@@ -23,6 +25,7 @@ pub struct HarnessHarness {
     instructions: Vec<String>,
     retry: RetryPolicy,
     tracer: Option<Arc<dyn Tracer>>,
+    session_store: Option<Arc<dyn SessionStore>>,
 }
 
 impl Harness {
@@ -30,8 +33,23 @@ impl Harness {
         HarnessHarness::new()
     }
 
+    /// Spawn a new agent.
     pub fn spawn(&self) -> Agent {
         Agent::new(self.clone())
+    }
+
+    /// Spawn an agent resuming from an existing session ID.
+    pub async fn resume_session(&self, session_id: impl Into<String>) -> Result<Agent, Error> {
+        let session_id = session_id.into();
+        let session_store = self
+            .session_store
+            .as_ref()
+            .ok_or(Error::MissingSessionStore)?;
+        let messages = session_store
+            .load(&session_id)
+            .await?
+            .ok_or_else(|| Error::SessionNotFound(session_id.clone()))?;
+        Ok(Agent::restore(self.clone(), session_id, messages))
     }
 
     pub fn instructions(&self) -> &str {
@@ -71,6 +89,11 @@ impl HarnessHarness {
         self
     }
 
+    pub fn session_store(mut self, session_store: impl SessionStore + 'static) -> Self {
+        self.session_store = Some(Arc::new(session_store));
+        self
+    }
+
     pub fn build(self) -> Result<Harness, Error> {
         let model = self.model.ok_or(Error::MissingModel)?;
         let instructions = self.instructions.join("\n\n");
@@ -83,6 +106,7 @@ impl HarnessHarness {
             instructions: Arc::from(instructions),
             retry: self.retry,
             tracer: Arc::new(tracer),
+            session_store: self.session_store,
             tracer_provider: self.tracer,
         })
     }

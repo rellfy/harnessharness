@@ -4,6 +4,7 @@ pub mod harness;
 pub mod message;
 pub mod model;
 pub mod retry;
+pub mod session;
 pub mod tracer;
 
 pub use agent::Agent;

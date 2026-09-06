@@ -25,6 +25,16 @@ pub enum Error {
     EmptyResponse,
     #[error("tracer error: {0}")]
     Tracer(String),
+    #[error(
+        "harness requires a session store to resume; call `.session_store(...)` on the builder"
+    )]
+    MissingSessionStore,
+    #[error("session `{0}` not found")]
+    SessionNotFound(String),
+    #[error("session store error: {0}")]
+    SessionStore(String),
+    #[error("unknown message role `{0}`")]
+    UnknownRole(String),
 }
 
 impl Error {
@@ -36,7 +46,11 @@ impl Error {
             | Error::MissingApiKey { .. }
             | Error::MissingEnvVar(_)
             | Error::EmptyResponse
-            | Error::Tracer(_) => false,
+            | Error::Tracer(_)
+            | Error::MissingSessionStore
+            | Error::SessionNotFound(_)
+            | Error::SessionStore(_)
+            | Error::UnknownRole(_) => false,
         }
     }
 }
