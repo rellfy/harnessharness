@@ -5,6 +5,9 @@ We heard you like a harness, so we made a harness for your harness.
 and spawn it into an agent that is ready to be deployed and prompted.
 
 ## Example
+Note: the example below is aspirational, not all features are implemented.
+See the [examples dir](./examples) for more examples.
+
 ```rust
 let harness = HarnessHarness::new()
     .model(OpenRouter::new("anthropic/claude-sonnet-4.5"))
