@@ -1,7 +1,7 @@
 # harnessharness
 We heard you like a harness, so we made a harness for your harness.
 
-`harnessharness` lets you Easily declare a harness using the builder pattern
+`harnessharness` lets you easily declare a harness using the builder pattern
 and spawn it into an agent that is ready to be deployed and prompted.
 
 ## Example
