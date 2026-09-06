@@ -68,7 +68,7 @@ impl SessionStore for Sqlite {
     async fn append(&self, session_id: &str, message: &Message) -> Result<(), Error> {
         sqlx::query(INSERT_MESSAGE)
             .bind(session_id)
-            .bind(message.role.as_str())
+            .bind(<&str>::from(message.role))
             .bind(&message.content)
             .execute(&self.pool)
             .await?;
@@ -92,7 +92,7 @@ fn message_from_row(row: &SqliteRow) -> Result<Message, Error> {
     let role: String = row.try_get("role")?;
     let content: String = row.try_get("content")?;
     Ok(Message {
-        role: role.parse::<Role>()?,
+        role: role.parse::<Role>().map_err(|_| Error::UnknownRole(role))?,
         content,
     })
 }
