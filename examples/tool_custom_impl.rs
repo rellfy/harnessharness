@@ -1,10 +1,8 @@
-use async_trait::async_trait;
 use harnessharness::Error;
 use harnessharness::HarnessHarness;
 use harnessharness::model::provider::Anthropic;
 use harnessharness::tool::Tool;
-use harnessharness::tool::ToolError;
-use harnessharness::tool::ToolOutput;
+use harnessharness::tool::ToolContext;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
@@ -38,8 +36,10 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-#[async_trait]
 impl Tool for RefundOrder {
+    type Output = String;
+    type Error = serde_json::Error;
+
     fn name(&self) -> &str {
         "refund_order"
     }
@@ -62,14 +62,17 @@ impl Tool for RefundOrder {
         })
     }
 
-    async fn call(&self, input: Value) -> Result<ToolOutput, ToolError> {
-        let input: RefundOrderInput = serde_json::from_value(input).map_err(ToolError::new)?;
-        let mut refunded_order_ids = self.refunded_order_ids.lock().map_err(ToolError::new)?;
-        refunded_order_ids.push(input.order_id.clone());
-        Ok(ToolOutput::text(format!(
-            "refunded order `{}`",
-            input.order_id
-        )))
+    async fn call(
+        &self,
+        input: Value,
+        _context: &ToolContext,
+    ) -> Result<String, serde_json::Error> {
+        let input: RefundOrderInput = serde_json::from_value(input)?;
+        self.refunded_order_ids
+            .lock()
+            .unwrap()
+            .push(input.order_id.clone());
+        Ok(format!("refunded order `{}`", input.order_id))
     }
 }
 

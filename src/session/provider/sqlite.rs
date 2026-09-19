@@ -1,4 +1,5 @@
 use crate::error::Error;
+use crate::message::ContentBlock;
 use crate::message::Message;
 use crate::message::Role;
 use crate::session::SessionStore;
@@ -66,10 +67,11 @@ impl SessionStore for Sqlite {
     }
 
     async fn append(&self, session_id: &str, message: &Message) -> Result<(), Error> {
+        let content = serde_json::to_string(&message.content)?;
         sqlx::query(INSERT_MESSAGE)
             .bind(session_id)
             .bind(<&str>::from(message.role))
-            .bind(&message.content)
+            .bind(content)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -78,6 +80,12 @@ impl SessionStore for Sqlite {
 
 impl From<sqlx::Error> for Error {
     fn from(error: sqlx::Error) -> Self {
+        Error::SessionStore(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
         Error::SessionStore(error.to_string())
     }
 }
@@ -91,6 +99,7 @@ impl From<MigrateError> for Error {
 fn message_from_row(row: &SqliteRow) -> Result<Message, Error> {
     let role: String = row.try_get("role")?;
     let content: String = row.try_get("content")?;
+    let content: Vec<ContentBlock> = serde_json::from_str(&content)?;
     Ok(Message {
         role: role.parse::<Role>().map_err(|_| Error::UnknownRole(role))?,
         content,
@@ -100,6 +109,9 @@ fn message_from_row(row: &SqliteRow) -> Result<Message, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::ToolResult;
+    use crate::message::ToolUse;
+    use serde_json::json;
 
     #[tokio::test]
     async fn appends_and_loads_in_order() {
@@ -115,6 +127,53 @@ mod tests {
             messages,
             vec![Message::user("hi"), Message::assistant("hello")]
         );
+    }
+
+    #[tokio::test]
+    async fn round_trips_tool_blocks() {
+        let store = Sqlite::in_memory().await.unwrap();
+        let tool_use = ContentBlock::ToolUse(ToolUse {
+            id: "toolu_1".to_string(),
+            name: "echo".to_string(),
+            input: json!({ "text": "hi" }),
+        });
+        let messages = vec![
+            Message::new(Role::Assistant, vec![ContentBlock::text("ok"), tool_use]),
+            Message::tool_results(vec![ToolResult {
+                tool_use_id: "toolu_1".to_string(),
+                content: "hi".to_string(),
+                is_error: false,
+            }]),
+        ];
+        for message in &messages {
+            store.append("a", message).await.unwrap();
+        }
+        assert_eq!(store.load("a").await.unwrap().unwrap(), messages);
+    }
+
+    #[tokio::test]
+    async fn migrates_plain_text_content_to_blocks() {
+        let options = SqliteConnectOptions::new().in_memory(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let legacy_migrator = Migrator {
+            migrations: MIGRATOR.migrations[..1].to_vec().into(),
+            ..Migrator::DEFAULT
+        };
+        legacy_migrator.run(&pool).await.unwrap();
+        sqlx::query(INSERT_MESSAGE)
+            .bind("a")
+            .bind("user")
+            .bind("it's \"quoted\"")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = Sqlite::from_pool(pool).await.unwrap();
+        let messages = store.load("a").await.unwrap().unwrap();
+        assert_eq!(messages, vec![Message::user("it's \"quoted\"")]);
     }
 
     #[tokio::test]

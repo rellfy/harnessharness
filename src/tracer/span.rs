@@ -1,5 +1,8 @@
 use crate::error::Error;
 use crate::message::Message;
+use crate::message::Role;
+use crate::message::ToolResult;
+use crate::message::ToolUse;
 use crate::model::Completion;
 use crate::model::CompletionRequest;
 use opentelemetry::Context;
@@ -35,6 +38,10 @@ pub struct GenerationSpan {
     span: BoxedSpan,
 }
 
+pub struct ToolSpan {
+    span: BoxedSpan,
+}
+
 #[derive(Serialize)]
 struct InstructionsMessage<'a> {
     role: &'static str,
@@ -61,8 +68,6 @@ impl AgentSpan {
         model_name: &str,
         request: &CompletionRequest<'_>,
     ) -> GenerationSpan {
-        let parent_context =
-            Context::new().with_remote_span_context(self.span.span_context().clone());
         let span = tracer
             .span_builder("generation")
             .with_kind(SpanKind::Client)
@@ -73,17 +78,33 @@ impl AgentSpan {
                 KeyValue::new(OBSERVATION_MODEL_NAME, model_name.to_string()),
                 KeyValue::new(OBSERVATION_INPUT, serialize_request(request)),
             ])
-            .start_with_context(tracer, &parent_context);
+            .start_with_context(tracer, &self.child_context());
         GenerationSpan { span }
     }
 
-    pub fn end(mut self, result: Result<Completion, Error>) -> Result<Completion, Error> {
+    pub fn tool(&self, tracer: &BoxedTracer, tool_use: &ToolUse) -> ToolSpan {
+        let span = tracer
+            .span_builder(tool_use.name.clone())
+            .with_kind(SpanKind::Internal)
+            .with_attributes([
+                KeyValue::new(OBSERVATION_TYPE, "tool"),
+                KeyValue::new(OBSERVATION_INPUT, tool_use.input.to_string()),
+            ])
+            .start_with_context(tracer, &self.child_context());
+        ToolSpan { span }
+    }
+
+    pub fn end(mut self, result: Result<String, Error>) -> Result<String, Error> {
         match &result {
-            Ok(completion) => record_output(&mut self.span, &completion.text),
-            Err(error) => record_error(&mut self.span, error),
+            Ok(output) => record_output(&mut self.span, output),
+            Err(error) => record_error(&mut self.span, &error.to_string()),
         }
         self.span.end();
         result
+    }
+
+    fn child_context(&self) -> Context {
+        Context::new().with_remote_span_context(self.span.span_context().clone())
     }
 }
 
@@ -91,10 +112,21 @@ impl GenerationSpan {
     pub fn end(mut self, result: Result<Completion, Error>) -> Result<Completion, Error> {
         match &result {
             Ok(completion) => record_completion(&mut self.span, completion),
-            Err(error) => record_error(&mut self.span, error),
+            Err(error) => record_error(&mut self.span, &error.to_string()),
         }
         self.span.end();
         result
+    }
+}
+
+impl ToolSpan {
+    pub fn end(mut self, tool_result: ToolResult) -> ToolResult {
+        match tool_result.is_error {
+            true => record_error(&mut self.span, &tool_result.content),
+            false => record_output(&mut self.span, &tool_result.content),
+        }
+        self.span.end();
+        tool_result
     }
 }
 
@@ -104,7 +136,7 @@ fn record_completion(span: &mut BoxedSpan, completion: &Completion) {
         "output": completion.usage.output_tokens,
     });
     span.set_attributes([
-        KeyValue::new(OBSERVATION_OUTPUT, completion.text.clone()),
+        KeyValue::new(OBSERVATION_OUTPUT, serialize_completion(completion)),
         KeyValue::new(
             GEN_AI_USAGE_INPUT_TOKENS,
             completion.usage.input_tokens as i64,
@@ -123,13 +155,20 @@ fn record_output(span: &mut BoxedSpan, output: &str) {
     span.set_status(Status::Ok);
 }
 
-fn record_error(span: &mut BoxedSpan, error: &Error) {
-    let message = error.to_string();
+fn record_error(span: &mut BoxedSpan, message: &str) {
     span.set_attributes([
         KeyValue::new(OBSERVATION_LEVEL, "ERROR"),
-        KeyValue::new(OBSERVATION_STATUS_MESSAGE, message.clone()),
+        KeyValue::new(OBSERVATION_STATUS_MESSAGE, message.to_string()),
     ]);
-    span.set_status(Status::error(message));
+    span.set_status(Status::error(message.to_string()));
+}
+
+fn serialize_completion(completion: &Completion) -> String {
+    json!({
+        "role": Role::Assistant,
+        "content": completion.content,
+    })
+    .to_string()
 }
 
 fn serialize_request(request: &CompletionRequest<'_>) -> String {

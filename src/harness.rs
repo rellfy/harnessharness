@@ -3,11 +3,17 @@ use crate::error::Error;
 use crate::model::Model;
 use crate::retry::RetryPolicy;
 use crate::session::SessionStore;
+use crate::tool::DynTool;
+use crate::tool::Tool;
+use crate::tool::ToolSpec;
 use crate::tracer::TRACER_NAME;
 use crate::tracer::Tracer;
 use opentelemetry::global;
 use opentelemetry::global::BoxedTracer;
+use std::collections::HashSet;
 use std::sync::Arc;
+
+const DEFAULT_MAX_ITERATIONS: u32 = 50;
 
 #[derive(Clone)]
 pub struct Harness {
@@ -16,16 +22,20 @@ pub struct Harness {
     pub(crate) retry: RetryPolicy,
     pub(crate) tracer: Arc<BoxedTracer>,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
+    pub(crate) tools: Arc<[Arc<dyn DynTool>]>,
+    pub(crate) tool_specs: Arc<[ToolSpec]>,
+    pub(crate) max_iterations: u32,
     tracer_provider: Option<Arc<dyn Tracer>>,
 }
 
-#[derive(Default)]
 pub struct HarnessHarness {
     model: Option<Arc<dyn Model>>,
     instructions: Vec<String>,
     retry: RetryPolicy,
     tracer: Option<Arc<dyn Tracer>>,
     session_store: Option<Arc<dyn SessionStore>>,
+    tools: Vec<Arc<dyn DynTool>>,
+    max_iterations: u32,
 }
 
 impl Harness {
@@ -62,6 +72,24 @@ impl Harness {
             None => Ok(()),
         }
     }
+
+    pub(crate) fn find_tool(&self, name: &str) -> Option<&Arc<dyn DynTool>> {
+        self.tools.iter().find(|tool| tool.name() == name)
+    }
+}
+
+impl Default for HarnessHarness {
+    fn default() -> Self {
+        Self {
+            model: None,
+            instructions: Vec::new(),
+            retry: RetryPolicy::default(),
+            tracer: None,
+            session_store: None,
+            tools: Vec::new(),
+            max_iterations: DEFAULT_MAX_ITERATIONS,
+        }
+    }
 }
 
 impl HarnessHarness {
@@ -94,8 +122,29 @@ impl HarnessHarness {
         self
     }
 
+    pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
+        self.tools.push(Arc::new(tool));
+        self
+    }
+
+    pub fn tools(mut self, tools: impl IntoIterator<Item = impl Tool + 'static>) -> Self {
+        let tools = tools
+            .into_iter()
+            .map(|tool| Arc::new(tool) as Arc<dyn DynTool>);
+        self.tools.extend(tools);
+        self
+    }
+
+    /// Maximum model calls per prompt, guarding against endless tool loops.
+    pub fn max_iterations(mut self, max_iterations: u32) -> Self {
+        self.max_iterations = max_iterations.max(1);
+        self
+    }
+
     pub fn build(self) -> Result<Harness, Error> {
         let model = self.model.ok_or(Error::MissingModel)?;
+        check_tool_names_are_unique(&self.tools)?;
+        let tool_specs = self.tools.iter().map(|tool| tool.spec()).collect();
         let instructions = self.instructions.join("\n\n");
         let tracer = match &self.tracer {
             Some(tracer_provider) => tracer_provider.tracer(),
@@ -107,7 +156,19 @@ impl HarnessHarness {
             retry: self.retry,
             tracer: Arc::new(tracer),
             session_store: self.session_store,
+            tools: Arc::from(self.tools),
+            tool_specs,
+            max_iterations: self.max_iterations,
             tracer_provider: self.tracer,
         })
+    }
+}
+
+fn check_tool_names_are_unique(tools: &[Arc<dyn DynTool>]) -> Result<(), Error> {
+    let mut names = HashSet::new();
+    let duplicate = tools.iter().find(|tool| !names.insert(tool.name()));
+    match duplicate {
+        Some(tool) => Err(Error::DuplicateTool(tool.name().to_string())),
+        None => Ok(()),
     }
 }

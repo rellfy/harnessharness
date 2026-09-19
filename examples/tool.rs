@@ -3,7 +3,6 @@ use harnessharness::HarnessHarness;
 use harnessharness::model::provider::Anthropic;
 use harnessharness::tool;
 use harnessharness::tool::ToolContext;
-use harnessharness::tool::ToolError;
 use serde::Serialize;
 
 const ORDER_ID: &str = "A-1042";
@@ -43,14 +42,14 @@ async fn main() -> Result<(), Error> {
 async fn get_order_status(
     /// Order identifier, e.g. "A-1042".
     order_id: String,
-) -> Result<OrderStatus, ToolError> {
+) -> Result<OrderStatus, String> {
     match order_id.as_str() {
         ORDER_ID => Ok(OrderStatus {
             order_id,
             carrier: CARRIER.to_string(),
             is_delivered: false,
         }),
-        _ => Err(ToolError::new(format!("order `{order_id}` not found"))),
+        _ => Err(format!("order `{order_id}` not found")),
     }
 }
 
@@ -64,13 +63,11 @@ async fn add_order_note(
     /// Whether the note is hidden from the customer. Defaults to true.
     is_internal: Option<bool>,
     context: &ToolContext,
-) -> Result<String, ToolError> {
+) -> String {
     let visibility = match is_internal.unwrap_or(true) {
         true => "internal",
         false => "customer-visible",
     };
     let agent_id = context.agent_id();
-    Ok(format!(
-        "saved {visibility} note on order `{order_id}` by agent `{agent_id}`: {note}"
-    ))
+    format!("saved {visibility} note on order `{order_id}` by agent `{agent_id}`: {note}")
 }

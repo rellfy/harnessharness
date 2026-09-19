@@ -35,6 +35,10 @@ pub enum Error {
     SessionStore(String),
     #[error("unknown message role `{0}`")]
     UnknownRole(String),
+    #[error("tool `{0}` is registered more than once")]
+    DuplicateTool(String),
+    #[error("agent exceeded the maximum of {0} model iterations")]
+    MaxIterationsExceeded(u32),
 }
 
 impl Error {
@@ -50,7 +54,9 @@ impl Error {
             | Error::MissingSessionStore
             | Error::SessionNotFound(_)
             | Error::SessionStore(_)
-            | Error::UnknownRole(_) => false,
+            | Error::UnknownRole(_)
+            | Error::DuplicateTool(_)
+            | Error::MaxIterationsExceeded(_) => false,
         }
     }
 }
