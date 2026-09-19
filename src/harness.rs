@@ -1,5 +1,6 @@
 use crate::agent::Agent;
 use crate::error::Error;
+use crate::frontend::Frontend;
 use crate::model::Model;
 use crate::retry::RetryPolicy;
 use crate::session::SessionStore;
@@ -60,6 +61,19 @@ impl Harness {
             .await?
             .ok_or_else(|| Error::SessionNotFound(session_id.clone()))?;
         Ok(Agent::restore(self.clone(), session_id, messages))
+    }
+
+    /// Chat with a fresh agent through a frontend until the frontend ends the session.
+    pub async fn run_interactive(&self, mut frontend: impl Frontend) -> Result<(), Error> {
+        let mut agent = self.spawn();
+        while let Some(input) = frontend.read_input().await? {
+            let reply_start = agent.messages().len() + 1;
+            match agent.prompt(input).await {
+                Ok(_) => frontend.show_messages(&agent.messages()[reply_start..])?,
+                Err(error) => frontend.show_error(&error)?,
+            }
+        }
+        Ok(())
     }
 
     pub fn instructions(&self) -> &str {

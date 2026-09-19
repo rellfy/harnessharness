@@ -2,6 +2,7 @@
 pub mod __private;
 pub mod agent;
 pub mod error;
+pub mod frontend;
 pub mod harness;
 pub mod message;
 pub mod model;
