@@ -14,17 +14,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Check tag matches Cargo.toml version
+      - name: Check tag matches every crate version
         run: |
-          crate_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
           tag_version="${GITHUB_REF_NAME#v}"
-          if [ "$crate_version" != "$tag_version" ]; then
-            echo "Tag v${tag_version} does not match Cargo.toml version ${crate_version}"
+          mismatched_crates="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg version "$tag_version" '.packages[] | select(.version != $version) | .name')"
+          if [ -n "$mismatched_crates" ]; then
+            echo "Tag v${tag_version} does not match the version of: ${mismatched_crates}"
             exit 1
           fi
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo publish
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo publish -p harnessharness-macros
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
+      - run: cargo publish -p harnessharness
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
