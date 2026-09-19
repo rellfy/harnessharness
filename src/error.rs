@@ -38,7 +38,7 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn get_is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         match self {
             Error::Http(error) => error.is_timeout() || error.is_connect() || error.is_body(),
             Error::Provider { status, .. } => *status >= 500 || RETRYABLE_STATUSES.contains(status),

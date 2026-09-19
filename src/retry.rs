@@ -29,7 +29,7 @@ where
         };
         failed_attempts += 1;
         let is_exhausted = failed_attempts >= policy.max_attempts;
-        if is_exhausted || !error.get_is_retryable() {
+        if is_exhausted || !error.is_retryable() {
             return Err(error);
         }
         sleep(policy.delay_after(failed_attempts)).await;
