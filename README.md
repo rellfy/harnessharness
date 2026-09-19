@@ -34,3 +34,26 @@ let harness = HarnessHarness::new()
 
 harness.run_interactive(Terminal).await?;
 ```
+
+## Tools
+Annotate a function with `#[tool]`. The doc comment becomes the tool
+description, and parameter doc comments become the input schema descriptions.
+
+```rust
+/// Look up the shipping status of an order.
+#[tool]
+async fn get_order_status(
+    /// Order identifier, e.g. "A-1042".
+    order_id: String,
+) -> Result<OrderStatus, String> {
+    // ...
+}
+
+let harness = HarnessHarness::new()
+    .model(Anthropic::new("claude-haiku-4-5"))
+    .tools([get_order_status])
+    .build()?;
+```
+
+For stateful tools, implement the `Tool` trait directly.
+See [tool.rs](./examples/tool.rs) and [tool_custom_impl.rs](./examples/tool_custom_impl.rs).
