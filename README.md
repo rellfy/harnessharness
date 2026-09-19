@@ -32,7 +32,7 @@ let harness = HarnessHarness::new()
     .tracer(Langfuse::from_env()?)
     .build()?;
 
-harness.run_interactive(Terminal).await?;
+harness.run_interactive(Terminal::new()).await?;
 ```
 
 ## Tools
