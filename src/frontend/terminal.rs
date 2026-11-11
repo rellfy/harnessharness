@@ -96,7 +96,9 @@ impl Terminal {
                     EntryKind::Tool,
                     format!("{}{} {}", TOOL_MARKER, tool_use.name, tool_use.input),
                 ),
-                (Role::User, ContentBlock::Text { .. }) | (_, ContentBlock::ToolResult(_)) => {}
+                (Role::User, ContentBlock::Text { .. })
+                | (_, ContentBlock::ToolResult(_))
+                | (_, ContentBlock::Compaction(_)) => {}
             }
         }
     }

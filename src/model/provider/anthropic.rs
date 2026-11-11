@@ -251,6 +251,9 @@ impl<'a> From<&'a ContentBlock> for ContentBlockParam<'a> {
                 content: &tool_result.content,
                 is_error: tool_result.is_error,
             },
+            ContentBlock::Compaction(compaction) => Self::Text {
+                text: &compaction.summary,
+            },
         }
     }
 }

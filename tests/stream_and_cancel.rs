@@ -413,7 +413,7 @@ fn stream_word_by_word(completion: &Completion, on_event: &StreamSink<'_>) {
                 id: tool_use.id.clone(),
                 name: tool_use.name.clone(),
             }),
-            ContentBlock::ToolResult(_) => {}
+            ContentBlock::ToolResult(_) | ContentBlock::Compaction(_) => {}
         }
     }
 }

@@ -2,6 +2,7 @@
 pub mod __private;
 pub mod agent;
 pub mod cancel;
+pub mod compaction;
 pub mod error;
 pub mod frontend;
 pub mod harness;
@@ -14,6 +15,7 @@ pub mod tracer;
 
 pub use agent::Agent;
 pub use cancel::CancelToken;
+pub use compaction::CompactionPolicy;
 pub use error::Error;
 pub use harness::Harness;
 pub use harness::HarnessHarness;

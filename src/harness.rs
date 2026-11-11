@@ -1,4 +1,5 @@
 use crate::agent::Agent;
+use crate::compaction::CompactionPolicy;
 use crate::error::Error;
 use crate::frontend::Frontend;
 use crate::message::Message;
@@ -26,6 +27,7 @@ pub struct Harness {
     pub(crate) model: Arc<dyn Model>,
     pub(crate) instructions: Arc<str>,
     pub(crate) retry: RetryPolicy,
+    pub(crate) compaction: Option<CompactionPolicy>,
     pub(crate) tracer: Arc<BoxedTracer>,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) message_listener: Option<MessageListener>,
@@ -40,6 +42,7 @@ pub struct HarnessHarness {
     model: Option<Arc<dyn Model>>,
     instructions: Vec<String>,
     retry: RetryPolicy,
+    compaction: Option<CompactionPolicy>,
     tracer: Option<Arc<dyn Tracer>>,
     session_store: Option<Arc<dyn SessionStore>>,
     message_listener: Option<MessageListener>,
@@ -107,6 +110,7 @@ impl Default for HarnessHarness {
             model: None,
             instructions: Vec::new(),
             retry: RetryPolicy::default(),
+            compaction: Some(CompactionPolicy::default()),
             tracer: None,
             session_store: None,
             message_listener: None,
@@ -134,6 +138,17 @@ impl HarnessHarness {
 
     pub fn retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Compaction is on by default with `CompactionPolicy::default()`.
+    pub fn compaction(mut self, compaction: CompactionPolicy) -> Self {
+        self.compaction = Some(compaction);
+        self
+    }
+
+    pub fn disable_compaction(mut self) -> Self {
+        self.compaction = None;
         self
     }
 
@@ -197,6 +212,7 @@ impl HarnessHarness {
             model,
             instructions: Arc::from(instructions),
             retry: self.retry,
+            compaction: self.compaction,
             tracer: Arc::new(tracer),
             session_store: self.session_store,
             message_listener: self.message_listener,

@@ -1,6 +1,13 @@
 use crate::cancel::CancelToken;
+use crate::compaction::CompactionPolicy;
+use crate::compaction::SUMMARY_REQUEST;
+use crate::compaction::build_context;
+use crate::compaction::estimate_prompt_tokens;
+use crate::compaction::estimate_tokens;
+use crate::compaction::find_split;
 use crate::error::Error;
 use crate::harness::Harness;
+use crate::message::Compaction;
 use crate::message::Message;
 use crate::message::Role;
 use crate::message::ToolResult;
@@ -8,6 +15,7 @@ use crate::message::ToolUse;
 use crate::model::Completion;
 use crate::model::CompletionRequest;
 use crate::model::StreamEvent;
+use crate::model::Usage;
 use crate::retry::retry;
 use crate::tool::ToolContext;
 use crate::tool::ToolOutput;
@@ -21,6 +29,14 @@ pub struct Agent {
     id: String,
     harness: Harness,
     messages: Vec<Message>,
+    measured_prompt: Option<MeasuredPrompt>,
+}
+
+/// The provider-reported size of the last prompt, and how many context messages it held.
+#[derive(Debug, Clone, Copy)]
+struct MeasuredPrompt {
+    context_len: usize,
+    tokens: u64,
 }
 
 impl Agent {
@@ -33,6 +49,7 @@ impl Agent {
             id,
             harness,
             messages,
+            measured_prompt: None,
         }
     }
 
@@ -59,8 +76,14 @@ impl Agent {
         &self.id
     }
 
+    /// The full history, including messages that compaction has hidden from the model.
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// The messages the model sees next.
+    pub fn context(&self) -> Vec<Message> {
+        build_context(&self.messages).into_owned()
     }
 
     async fn run_loop(
@@ -72,10 +95,12 @@ impl Agent {
         self.close_dangling_tool_uses().await?;
         self.push_message(Message::user(input)).await?;
         for _ in 0..self.harness.max_iterations {
+            self.compact_if_needed(span, cancel).await?;
             let completion = cancel
                 .guard(self.complete(span))
                 .await
                 .ok_or(Error::Cancelled)??;
+            self.measure_prompt(&completion.usage);
             let message = Message::new(Role::Assistant, completion.content);
             let tool_uses: Vec<ToolUse> = message.tool_uses().into_iter().cloned().collect();
             let text = message.text();
@@ -97,9 +122,10 @@ impl Agent {
     async fn complete(&self, span: &AgentSpan) -> Result<Completion, Error> {
         let tracer = &self.harness.tracer;
         let model = &self.harness.model;
+        let context = build_context(&self.messages);
         let request = CompletionRequest {
             instructions: &self.harness.instructions,
-            messages: &self.messages,
+            messages: &context,
             tools: &self.harness.tool_specs,
         };
         retry(&self.harness.retry, || async {
@@ -120,6 +146,93 @@ impl Agent {
         stream_listener(&self.id, &StreamEvent::ResponseStarted);
         let on_event = |event: StreamEvent| stream_listener(&self.id, &event);
         self.harness.model.stream(request, &on_event).await
+    }
+
+    async fn compact_if_needed(
+        &mut self,
+        span: &AgentSpan,
+        cancel: &CancelToken,
+    ) -> Result<(), Error> {
+        let Some(policy) = self.harness.compaction else {
+            return Ok(());
+        };
+        let Some(split) = self.find_compaction_split(&policy) else {
+            return Ok(());
+        };
+        let summary = cancel
+            .guard(self.summarise(span, split))
+            .await
+            .ok_or(Error::Cancelled)??;
+        let kept_message_count = build_context(&self.messages).len() - split;
+        let compaction = Compaction {
+            summary,
+            kept_message_count,
+        };
+        self.push_message(Message::compaction(compaction)).await?;
+        self.measured_prompt = None;
+        Ok(())
+    }
+
+    fn find_compaction_split(&self, policy: &CompactionPolicy) -> Option<usize> {
+        let context = build_context(&self.messages);
+        if self.estimate_context_tokens(&context) < policy.trigger_tokens {
+            return None;
+        }
+        find_split(&context, policy.keep_tokens)
+    }
+
+    fn estimate_context_tokens(&self, context: &[Message]) -> u64 {
+        match self.measured_prompt {
+            Some(measured) if measured.context_len <= context.len() => {
+                measured.tokens + estimate_tokens(&context[measured.context_len..])
+            }
+            _ => {
+                let prompt_tokens =
+                    estimate_prompt_tokens(&self.harness.instructions, &self.harness.tool_specs);
+                prompt_tokens + estimate_tokens(context)
+            }
+        }
+    }
+
+    /// Asks the model to summarise `context[..split]`.
+    /// The request repeats the regular prefix (tools, instructions, messages) so it can reuse the
+    /// prompt cache, and is not streamed to the embedder.
+    async fn summarise(&self, span: &AgentSpan, split: usize) -> Result<String, Error> {
+        let tracer = &self.harness.tracer;
+        let model = &self.harness.model;
+        let context = build_context(&self.messages);
+        let messages: Vec<Message> = context[..split]
+            .iter()
+            .cloned()
+            .chain([Message::user(SUMMARY_REQUEST)])
+            .collect();
+        let request = CompletionRequest {
+            instructions: &self.harness.instructions,
+            messages: &messages,
+            tools: &self.harness.tool_specs,
+        };
+        let completion = retry(&self.harness.retry, || async {
+            let generation = span.generation(tracer, model.name(), &request);
+            generation.end(model.complete(request.clone()).await)
+        })
+        .await?;
+        let summary = completion.text();
+        match summary.trim().is_empty() {
+            true => Err(Error::EmptyResponse),
+            false => Ok(summary.trim().to_string()),
+        }
+    }
+
+    fn measure_prompt(&mut self, usage: &Usage) {
+        let tokens =
+            usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+        self.measured_prompt = match tokens {
+            0 => None,
+            _ => Some(MeasuredPrompt {
+                context_len: build_context(&self.messages).len(),
+                tokens,
+            }),
+        };
     }
 
     async fn execute_tools(&self, span: &AgentSpan, tool_uses: &[ToolUse]) -> Vec<ToolResult> {
