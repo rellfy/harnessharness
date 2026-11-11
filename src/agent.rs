@@ -1,3 +1,4 @@
+use crate::cancel::CancelToken;
 use crate::error::Error;
 use crate::harness::Harness;
 use crate::message::Message;
@@ -6,12 +7,15 @@ use crate::message::ToolResult;
 use crate::message::ToolUse;
 use crate::model::Completion;
 use crate::model::CompletionRequest;
+use crate::model::StreamEvent;
 use crate::retry::retry;
 use crate::tool::ToolContext;
 use crate::tool::ToolOutput;
 use crate::tracer::span::AgentSpan;
 use futures_util::future::join_all;
 use uuid::Uuid;
+
+const INTERRUPTED_TOOL_RESULT: &str = "the tool call was cancelled before it returned a result";
 
 pub struct Agent {
     id: String,
@@ -33,9 +37,21 @@ impl Agent {
     }
 
     pub async fn prompt(&mut self, input: impl Into<String>) -> Result<String, Error> {
+        self.prompt_cancellable(input, &CancelToken::new()).await
+    }
+
+    /// Like `prompt`, but stops with `Error::Cancelled` once `cancel` is cancelled.
+    /// The in-flight model request or tool calls are dropped.
+    /// The history stays valid: a cancelled response is not kept, and tool calls that were
+    /// running get error results.
+    pub async fn prompt_cancellable(
+        &mut self,
+        input: impl Into<String>,
+        cancel: &CancelToken,
+    ) -> Result<String, Error> {
         let input = input.into();
         let span = AgentSpan::start(&self.harness.tracer, "prompt", &self.id, &input);
-        let result = self.run_loop(&span, input).await;
+        let result = self.run_loop(&span, input, cancel).await;
         span.end(result)
     }
 
@@ -47,17 +63,31 @@ impl Agent {
         &self.messages
     }
 
-    async fn run_loop(&mut self, span: &AgentSpan, input: String) -> Result<String, Error> {
+    async fn run_loop(
+        &mut self,
+        span: &AgentSpan,
+        input: String,
+        cancel: &CancelToken,
+    ) -> Result<String, Error> {
+        self.close_dangling_tool_uses().await?;
         self.push_message(Message::user(input)).await?;
         for _ in 0..self.harness.max_iterations {
-            let completion = self.complete(span).await?;
+            let completion = cancel
+                .guard(self.complete(span))
+                .await
+                .ok_or(Error::Cancelled)??;
             let message = Message::new(Role::Assistant, completion.content);
-            let tool_results = self.execute_tools(span, &message.tool_uses()).await;
+            let tool_uses: Vec<ToolUse> = message.tool_uses().into_iter().cloned().collect();
             let text = message.text();
             self.push_message(message).await?;
-            if tool_results.is_empty() {
+            if tool_uses.is_empty() {
                 return Ok(text);
             }
+            let tool_results = cancel.guard(self.execute_tools(span, &tool_uses)).await;
+            let Some(tool_results) = tool_results else {
+                self.close_dangling_tool_uses().await?;
+                return Err(Error::Cancelled);
+            };
             self.push_message(Message::tool_results(tool_results))
                 .await?;
         }
@@ -74,13 +104,25 @@ impl Agent {
         };
         retry(&self.harness.retry, || async {
             let generation = span.generation(tracer, model.name(), &request);
-            let completion_result = model.complete(request.clone()).await;
+            let completion_result = self.request_completion(request.clone()).await;
             generation.end(completion_result)
         })
         .await
     }
 
-    async fn execute_tools(&self, span: &AgentSpan, tool_uses: &[&ToolUse]) -> Vec<ToolResult> {
+    async fn request_completion(
+        &self,
+        request: CompletionRequest<'_>,
+    ) -> Result<Completion, Error> {
+        let Some(stream_listener) = &self.harness.stream_listener else {
+            return self.harness.model.complete(request).await;
+        };
+        stream_listener(&self.id, &StreamEvent::ResponseStarted);
+        let on_event = |event: StreamEvent| stream_listener(&self.id, &event);
+        self.harness.model.stream(request, &on_event).await
+    }
+
+    async fn execute_tools(&self, span: &AgentSpan, tool_uses: &[ToolUse]) -> Vec<ToolResult> {
         let context = ToolContext::new(&self.id);
         let executions = tool_uses
             .iter()
@@ -101,6 +143,26 @@ impl Agent {
             None => Err(format!("unknown tool `{}`", tool_use.name)),
         };
         tool_span.end(build_tool_result(&tool_use.id, result))
+    }
+
+    /// Answer tool calls left without results by a cancel, a crash or a failed append, so the
+    /// history the model sees next pairs every tool call with a result.
+    async fn close_dangling_tool_uses(&mut self) -> Result<(), Error> {
+        let Some(last_message) = self.messages.last() else {
+            return Ok(());
+        };
+        if last_message.role != Role::Assistant {
+            return Ok(());
+        }
+        let tool_results: Vec<ToolResult> = last_message
+            .tool_uses()
+            .into_iter()
+            .map(|tool_use| build_tool_result(&tool_use.id, Err(INTERRUPTED_TOOL_RESULT.into())))
+            .collect();
+        if tool_results.is_empty() {
+            return Ok(());
+        }
+        self.push_message(Message::tool_results(tool_results)).await
     }
 
     async fn push_message(&mut self, message: Message) -> Result<(), Error> {

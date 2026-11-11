@@ -1,3 +1,5 @@
+mod stream;
+
 use crate::error::Error;
 use crate::message::ContentBlock;
 use crate::message::Message;
@@ -7,10 +9,12 @@ use crate::model::Completion;
 use crate::model::CompletionRequest;
 use crate::model::Model;
 use crate::model::StopReason;
+use crate::model::StreamSink;
 use crate::model::Usage;
 use crate::tool::ToolSpec;
 use async_trait::async_trait;
 use reqwest::Client;
+use reqwest::Response;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -36,6 +40,8 @@ pub struct Anthropic {
 struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "<&bool as std::ops::Not>::not")]
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -155,10 +161,35 @@ impl Anthropic {
         MessagesRequest {
             model: &self.model,
             max_tokens: self.max_tokens,
+            stream: false,
             cache_control,
             system: build_system(request.instructions, cache_control),
             messages: request.messages.iter().map(MessageParam::from).collect(),
             tools: request.tools,
+        }
+    }
+
+    async fn send(&self, body: &MessagesRequest<'_>) -> Result<Response, Error> {
+        let api_key = self.api_key.as_deref().ok_or(Error::MissingApiKey {
+            provider: PROVIDER_NAME,
+            env_var: API_KEY_ENV_VAR,
+        })?;
+        let response = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", API_VERSION)
+            .json(body)
+            .send()
+            .await?;
+        let status = response.status();
+        match status.is_success() {
+            true => Ok(response),
+            false => Err(Error::Provider {
+                provider: PROVIDER_NAME,
+                status: status.as_u16(),
+                body: response.text().await?,
+            }),
         }
     }
 }
@@ -170,29 +201,22 @@ impl Model for Anthropic {
     }
 
     async fn complete(&self, request: CompletionRequest<'_>) -> Result<Completion, Error> {
-        let api_key = self.api_key.as_deref().ok_or(Error::MissingApiKey {
-            provider: PROVIDER_NAME,
-            env_var: API_KEY_ENV_VAR,
-        })?;
         let body = self.messages_request(&request);
-        let response = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", api_key)
-            .header("anthropic-version", API_VERSION)
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        let is_success = status.is_success();
-        match is_success {
-            true => parse_completion(response.json().await?),
-            false => Err(Error::Provider {
-                provider: PROVIDER_NAME,
-                status: status.as_u16(),
-                body: response.text().await?,
-            }),
-        }
+        let response = self.send(&body).await?;
+        parse_completion(response.json().await?)
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest<'_>,
+        on_event: &StreamSink<'_>,
+    ) -> Result<Completion, Error> {
+        let body = MessagesRequest {
+            stream: true,
+            ..self.messages_request(&request)
+        };
+        let response = self.send(&body).await?;
+        stream::read_completion(response, on_event).await
     }
 }
 
@@ -257,9 +281,16 @@ fn build_system(
 
 fn parse_completion(response: MessagesResponse) -> Result<Completion, Error> {
     let usage = Usage::from(response.usage);
-    let stop_reason = parse_stop_reason(response.stop_reason.as_deref());
-    let content = response
-        .content
+    build_completion(response.content, response.stop_reason.as_deref(), usage)
+}
+
+fn build_completion(
+    content: Vec<ContentBlockResponse>,
+    stop_reason: Option<&str>,
+    usage: Usage,
+) -> Result<Completion, Error> {
+    let stop_reason = parse_stop_reason(stop_reason);
+    let content = content
         .into_iter()
         .filter_map(parse_content_block)
         .collect::<Vec<ContentBlock>>();

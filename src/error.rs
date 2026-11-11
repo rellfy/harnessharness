@@ -41,12 +41,20 @@ pub enum Error {
     DuplicateTool(String),
     #[error("agent exceeded the maximum of {0} model iterations")]
     MaxIterationsExceeded(u32),
+    #[error("the prompt was cancelled")]
+    Cancelled,
+    #[error("provider `{provider}` sent a broken response stream: {reason}")]
+    Stream {
+        provider: &'static str,
+        reason: String,
+    },
 }
 
 impl Error {
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::Http(error) => error.is_timeout() || error.is_connect() || error.is_body(),
+            Error::Stream { .. } => true,
             Error::Provider { status, .. } => *status >= 500 || RETRYABLE_STATUSES.contains(status),
             Error::MissingModel
             | Error::MissingApiKey { .. }
@@ -59,7 +67,8 @@ impl Error {
             | Error::UnknownRole(_)
             | Error::Io(_)
             | Error::DuplicateTool(_)
-            | Error::MaxIterationsExceeded(_) => false,
+            | Error::MaxIterationsExceeded(_)
+            | Error::Cancelled => false,
         }
     }
 }

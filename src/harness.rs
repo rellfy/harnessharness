@@ -3,6 +3,7 @@ use crate::error::Error;
 use crate::frontend::Frontend;
 use crate::message::Message;
 use crate::model::Model;
+use crate::model::StreamEvent;
 use crate::retry::RetryPolicy;
 use crate::session::SessionStore;
 use crate::tool::DynTool;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 const DEFAULT_MAX_ITERATIONS: u32 = 50;
 
 pub(crate) type MessageListener = Arc<dyn Fn(&str, &Message) + Send + Sync>;
+pub(crate) type StreamListener = Arc<dyn Fn(&str, &StreamEvent) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Harness {
@@ -27,6 +29,7 @@ pub struct Harness {
     pub(crate) tracer: Arc<BoxedTracer>,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
     pub(crate) message_listener: Option<MessageListener>,
+    pub(crate) stream_listener: Option<StreamListener>,
     pub(crate) tools: Arc<[Arc<dyn DynTool>]>,
     pub(crate) tool_specs: Arc<[ToolSpec]>,
     pub(crate) max_iterations: u32,
@@ -40,6 +43,7 @@ pub struct HarnessHarness {
     tracer: Option<Arc<dyn Tracer>>,
     session_store: Option<Arc<dyn SessionStore>>,
     message_listener: Option<MessageListener>,
+    stream_listener: Option<StreamListener>,
     tools: Vec<Arc<dyn DynTool>>,
     max_iterations: u32,
 }
@@ -106,6 +110,7 @@ impl Default for HarnessHarness {
             tracer: None,
             session_store: None,
             message_listener: None,
+            stream_listener: None,
             tools: Vec::new(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
         }
@@ -149,6 +154,17 @@ impl HarnessHarness {
         self
     }
 
+    /// Observe model output as it streams, before the complete message reaches `on_message`.
+    /// The listener receives the agent ID and the event.
+    /// Registering it makes agents call `Model::stream` instead of `Model::complete`.
+    pub fn on_stream(
+        mut self,
+        listener: impl Fn(&str, &StreamEvent) + Send + Sync + 'static,
+    ) -> Self {
+        self.stream_listener = Some(Arc::new(listener));
+        self
+    }
+
     pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
         self.tools.push(Arc::new(tool));
         self
@@ -184,6 +200,7 @@ impl HarnessHarness {
             tracer: Arc::new(tracer),
             session_store: self.session_store,
             message_listener: self.message_listener,
+            stream_listener: self.stream_listener,
             tools: Arc::from(self.tools),
             tool_specs,
             max_iterations: self.max_iterations,
