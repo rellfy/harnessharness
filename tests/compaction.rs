@@ -31,14 +31,25 @@ const OUTPUT_BYTES: usize = 400;
 const TRIGGER_TOKENS: u64 = 600;
 const KEEP_TOKENS: u64 = 200;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SummaryMode {
+    #[default]
+    Text,
+    TextWithToolUse,
+    ToolUseOnly,
+    Stall,
+}
+
 #[derive(Clone, Default)]
 struct CodingModel {
     requests: Arc<Mutex<Vec<Vec<Message>>>>,
     summary_count: Arc<Mutex<usize>>,
-    is_summary_stalled: bool,
+    summary_mode: SummaryMode,
 }
 
-struct Echo;
+struct Echo {
+    output_bytes: usize,
+}
 
 #[derive(Default)]
 struct MemoryStore {
@@ -71,12 +82,31 @@ impl Model for CodingModel {
 
 impl CodingModel {
     async fn summarise(&self, usage: Usage) -> Result<Completion, Error> {
-        if self.is_summary_stalled {
+        if self.summary_mode == SummaryMode::Stall {
             return pending().await;
         }
         let mut summary_count = self.summary_count.lock().unwrap();
         *summary_count += 1;
-        Ok(reply(&format!("summary {summary_count}"), usage))
+        let text = reply(&format!("summary {summary_count}"), usage);
+        let tool_use = tool_call("summary-call", usage);
+        let completion = match self.summary_mode {
+            SummaryMode::Text | SummaryMode::Stall => text,
+            SummaryMode::ToolUseOnly => tool_use,
+            SummaryMode::TextWithToolUse => Completion {
+                content: [tool_use.content, text.content].concat(),
+                ..text
+            },
+        };
+        Ok(completion)
+    }
+
+    fn summary_requests(&self) -> Vec<Vec<Message>> {
+        let requests = self.requests.lock().unwrap();
+        requests
+            .iter()
+            .filter(|messages| check_is_summary_request(messages))
+            .cloned()
+            .collect()
     }
 
     fn summary_count(&self) -> usize {
@@ -110,7 +140,7 @@ impl Tool for Echo {
     }
 
     async fn call(&self, _input: Value, _context: &ToolContext) -> Result<String, Infallible> {
-        Ok("o".repeat(OUTPUT_BYTES))
+        Ok("o".repeat(self.output_bytes))
     }
 }
 
@@ -215,7 +245,7 @@ async fn does_not_compact_when_disabled() {
     let model = CodingModel::default();
     let harness = HarnessHarness::new()
         .model(model.clone())
-        .tool(Echo)
+        .tool(echo())
         .disable_compaction()
         .build()
         .unwrap();
@@ -232,7 +262,7 @@ async fn compacts_by_default_with_a_large_trigger() {
     let model = CodingModel::default();
     let harness = HarnessHarness::new()
         .model(model.clone())
-        .tool(Echo)
+        .tool(echo())
         .build()
         .unwrap();
     let mut agent = harness.spawn();
@@ -244,7 +274,7 @@ async fn compacts_by_default_with_a_large_trigger() {
 #[tokio::test]
 async fn cancels_during_summarisation_without_a_record() {
     let model = CodingModel {
-        is_summary_stalled: true,
+        summary_mode: SummaryMode::Stall,
         ..CodingModel::default()
     };
     let harness = build_harness(&model, Arc::default());
@@ -279,14 +309,89 @@ async fn cancels_during_summarisation_without_a_record() {
     assert_valid_context(&agent.context());
 }
 
+fn echo() -> Echo {
+    Echo {
+        output_bytes: OUTPUT_BYTES,
+    }
+}
+
+#[tokio::test]
+async fn skips_compaction_when_the_last_exchange_alone_is_over_the_trigger() {
+    let model = CodingModel::default();
+    let flood = Echo {
+        output_bytes: TRIGGER_TOKENS as usize * 8,
+    };
+    let harness = build_harness_with_tool(&model, Arc::default(), flood);
+    let mut agent = harness.spawn();
+    assert_eq!(agent.prompt("flood").await.unwrap(), "done");
+    assert_eq!(model.summary_requests().len(), 0);
+    assert_eq!(model.task_requests().len(), TOOL_CALLS_PER_PROMPT + 1);
+}
+
+#[tokio::test]
+async fn uses_only_the_text_of_a_summary_with_tool_calls() {
+    let model = CodingModel {
+        summary_mode: SummaryMode::TextWithToolUse,
+        ..CodingModel::default()
+    };
+    let harness = build_harness(&model, Arc::default());
+    let mut agent = harness.spawn();
+    while model.summary_count() == 0 {
+        agent.prompt("work").await.unwrap();
+    }
+    let record = agent
+        .messages()
+        .iter()
+        .find_map(|message| message.as_compaction())
+        .unwrap();
+    assert_eq!(record.summary, "summary 1");
+    assert_valid_context(&agent.context());
+}
+
+#[tokio::test]
+async fn skips_a_summary_without_text_and_never_retries_its_span() {
+    let model = CodingModel {
+        summary_mode: SummaryMode::ToolUseOnly,
+        ..CodingModel::default()
+    };
+    let harness = build_harness(&model, Arc::default());
+    let mut agent = harness.spawn();
+    for _ in 0..4 {
+        assert_eq!(agent.prompt("work").await.unwrap(), "done");
+    }
+    let summary_requests = model.summary_requests();
+    assert!(!summary_requests.is_empty());
+    let has_record = agent
+        .messages()
+        .iter()
+        .any(|message| message.as_compaction().is_some());
+    assert!(!has_record);
+    let summarised_lengths: Vec<usize> = summary_requests
+        .iter()
+        .map(|messages| messages.len())
+        .collect();
+    let mut distinct_lengths = summarised_lengths.clone();
+    distinct_lengths.dedup();
+    assert_eq!(summarised_lengths, distinct_lengths);
+    assert!(summarised_lengths.is_sorted());
+}
+
 fn build_harness(model: &CodingModel, store: Arc<MemoryStore>) -> harnessharness::Harness {
+    build_harness_with_tool(model, store, echo())
+}
+
+fn build_harness_with_tool(
+    model: &CodingModel,
+    store: Arc<MemoryStore>,
+    tool: Echo,
+) -> harnessharness::Harness {
     let policy = CompactionPolicy::default()
         .trigger_tokens(TRIGGER_TOKENS)
         .keep_tokens(KEEP_TOKENS);
     HarnessHarness::new()
         .model(model.clone())
         .instructions("Be useful.")
-        .tool(Echo)
+        .tool(tool)
         .compaction(policy)
         .session_store(SharedStore(store))
         .build()

@@ -30,6 +30,15 @@ pub struct Agent {
     harness: Harness,
     messages: Vec<Message>,
     measured_prompt: Option<MeasuredPrompt>,
+    summarised_span_end: Option<usize>,
+}
+
+/// A planned compaction: summarise `context[..split]`, which ends at history message `span_end`
+/// (counted without compaction records).
+#[derive(Debug, Clone, Copy)]
+struct CompactionPlan {
+    split: usize,
+    span_end: usize,
 }
 
 /// The provider-reported size of the last prompt, and how many context messages it held.
@@ -50,6 +59,7 @@ impl Agent {
             harness,
             messages,
             measured_prompt: None,
+            summarised_span_end: None,
         }
     }
 
@@ -156,14 +166,18 @@ impl Agent {
         let Some(policy) = self.harness.compaction else {
             return Ok(());
         };
-        let Some(split) = self.find_compaction_split(&policy) else {
+        let Some(plan) = self.plan_compaction(&policy) else {
             return Ok(());
         };
+        self.summarised_span_end = Some(plan.span_end);
         let summary = cancel
-            .guard(self.summarise(span, split))
+            .guard(self.summarise(span, plan.split))
             .await
             .ok_or(Error::Cancelled)??;
-        let kept_message_count = build_context(&self.messages).len() - split;
+        let Some(summary) = summary else {
+            return Ok(());
+        };
+        let kept_message_count = build_context(&self.messages).len() - plan.split;
         let compaction = Compaction {
             summary,
             kept_message_count,
@@ -173,12 +187,31 @@ impl Agent {
         Ok(())
     }
 
-    fn find_compaction_split(&self, policy: &CompactionPolicy) -> Option<usize> {
+    /// Plans a compaction only when it can help: the context is over the trigger, the kept part
+    /// alone would be under it, and the span was not summarised (or tried) before.
+    /// Otherwise the oversized context goes to the provider as it is.
+    fn plan_compaction(&self, policy: &CompactionPolicy) -> Option<CompactionPlan> {
         let context = build_context(&self.messages);
         if self.estimate_context_tokens(&context) < policy.trigger_tokens {
             return None;
         }
-        find_split(&context, policy.keep_tokens)
+        let split = find_split(&context, policy.keep_tokens)?;
+        if estimate_tokens(&context[split..]) >= policy.trigger_tokens {
+            return None;
+        }
+        let real_message_count = self
+            .messages
+            .iter()
+            .filter(|message| message.as_compaction().is_none())
+            .count();
+        let span_end = real_message_count - (context.len() - split);
+        let is_summarised = self
+            .summarised_span_end
+            .is_some_and(|summarised_span_end| span_end <= summarised_span_end);
+        match is_summarised {
+            true => None,
+            false => Some(CompactionPlan { split, span_end }),
+        }
     }
 
     fn estimate_context_tokens(&self, context: &[Message]) -> u64 {
@@ -197,7 +230,8 @@ impl Agent {
     /// Asks the model to summarise `context[..split]`.
     /// The request repeats the regular prefix (tools, instructions, messages) so it can reuse the
     /// prompt cache, and is not streamed to the embedder.
-    async fn summarise(&self, span: &AgentSpan, split: usize) -> Result<String, Error> {
+    /// Only the text counts; tool calls in the reply are ignored, and no text means no summary.
+    async fn summarise(&self, span: &AgentSpan, split: usize) -> Result<Option<String>, Error> {
         let tracer = &self.harness.tracer;
         let model = &self.harness.model;
         let context = build_context(&self.messages);
@@ -215,11 +249,15 @@ impl Agent {
             let generation = span.generation(tracer, model.name(), &request);
             generation.end(model.complete(request.clone()).await)
         })
-        .await?;
-        let summary = completion.text();
+        .await;
+        let summary = match completion {
+            Ok(completion) => completion.text(),
+            Err(Error::EmptyResponse) => String::new(),
+            Err(error) => return Err(error),
+        };
         match summary.trim().is_empty() {
-            true => Err(Error::EmptyResponse),
-            false => Ok(summary.trim().to_string()),
+            true => Ok(None),
+            false => Ok(Some(summary.trim().to_string())),
         }
     }
 
