@@ -5,6 +5,7 @@ use crate::message::ToolResult;
 use crate::message::ToolUse;
 use crate::model::Completion;
 use crate::model::CompletionRequest;
+use crate::model::Usage;
 use opentelemetry::Context;
 use opentelemetry::KeyValue;
 use opentelemetry::global::BoxedSpan;
@@ -29,6 +30,9 @@ pub const GEN_AI_OPERATION_NAME: &str = "gen_ai.operation.name";
 pub const GEN_AI_REQUEST_MODEL: &str = "gen_ai.request.model";
 pub const GEN_AI_USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 pub const GEN_AI_USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
+pub const GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS: &str = "gen_ai.usage.cache_read.input_tokens";
+pub const GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS: &str =
+    "gen_ai.usage.cache_creation.input_tokens";
 
 pub struct AgentSpan {
     span: BoxedSpan,
@@ -131,21 +135,20 @@ impl ToolSpan {
 }
 
 fn record_completion(span: &mut BoxedSpan, completion: &Completion) {
-    let usage_details = json!({
-        "input": completion.usage.input_tokens,
-        "output": completion.usage.output_tokens,
-    });
+    let usage = &completion.usage;
     span.set_attributes([
         KeyValue::new(OBSERVATION_OUTPUT, serialize_completion(completion)),
+        KeyValue::new(GEN_AI_USAGE_INPUT_TOKENS, sum_input_tokens(usage) as i64),
+        KeyValue::new(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens as i64),
         KeyValue::new(
-            GEN_AI_USAGE_INPUT_TOKENS,
-            completion.usage.input_tokens as i64,
+            GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+            usage.cache_read_input_tokens as i64,
         ),
         KeyValue::new(
-            GEN_AI_USAGE_OUTPUT_TOKENS,
-            completion.usage.output_tokens as i64,
+            GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+            usage.cache_creation_input_tokens as i64,
         ),
-        KeyValue::new(OBSERVATION_USAGE_DETAILS, usage_details.to_string()),
+        KeyValue::new(OBSERVATION_USAGE_DETAILS, serialize_usage_details(usage)),
     ]);
     span.set_status(Status::Ok);
 }
@@ -161,6 +164,20 @@ fn record_error(span: &mut BoxedSpan, message: &str) {
         KeyValue::new(OBSERVATION_STATUS_MESSAGE, message.to_string()),
     ]);
     span.set_status(Status::error(message.to_string()));
+}
+
+fn sum_input_tokens(usage: &Usage) -> u64 {
+    usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+}
+
+fn serialize_usage_details(usage: &Usage) -> String {
+    json!({
+        "input": usage.input_tokens,
+        "output": usage.output_tokens,
+        "cache_read_input_tokens": usage.cache_read_input_tokens,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+    })
+    .to_string()
 }
 
 fn serialize_completion(completion: &Completion) -> String {

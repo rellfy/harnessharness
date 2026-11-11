@@ -28,6 +28,7 @@ pub struct Anthropic {
     api_key: Option<String>,
     base_url: String,
     max_tokens: u32,
+    is_prompt_caching_enabled: bool,
     client: Client,
 }
 
@@ -35,11 +36,29 @@ pub struct Anthropic {
 struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: u32,
-    #[serde(skip_serializing_if = "str::is_empty")]
-    system: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<SystemBlockParam<'a>>,
     messages: Vec<MessageParam<'a>>,
     #[serde(skip_serializing_if = "<[ToolSpec]>::is_empty")]
     tools: &'a [ToolSpec],
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CacheControl {
+    Ephemeral,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SystemBlockParam<'a> {
+    Text {
+        text: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
 }
 
 #[derive(Serialize)]
@@ -77,6 +96,8 @@ struct MessagesResponse {
 struct UsageResponse {
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +122,7 @@ impl Anthropic {
             api_key: env::var(API_KEY_ENV_VAR).ok(),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
+            is_prompt_caching_enabled: true,
             client: Client::new(),
         }
     }
@@ -119,6 +141,26 @@ impl Anthropic {
         self.max_tokens = max_tokens;
         self
     }
+
+    /// Prompt caching is on by default; pass `false` to send requests without cache markers.
+    pub fn prompt_caching(mut self, is_enabled: bool) -> Self {
+        self.is_prompt_caching_enabled = is_enabled;
+        self
+    }
+
+    fn messages_request<'a>(&'a self, request: &CompletionRequest<'a>) -> MessagesRequest<'a> {
+        let cache_control = self
+            .is_prompt_caching_enabled
+            .then_some(CacheControl::Ephemeral);
+        MessagesRequest {
+            model: &self.model,
+            max_tokens: self.max_tokens,
+            cache_control,
+            system: build_system(request.instructions, cache_control),
+            messages: request.messages.iter().map(MessageParam::from).collect(),
+            tools: request.tools,
+        }
+    }
 }
 
 #[async_trait]
@@ -132,7 +174,7 @@ impl Model for Anthropic {
             provider: PROVIDER_NAME,
             env_var: API_KEY_ENV_VAR,
         })?;
-        let body = MessagesRequest::from_completion_request(&self.model, self.max_tokens, &request);
+        let body = self.messages_request(&request);
         let response = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
@@ -150,22 +192,6 @@ impl Model for Anthropic {
                 status: status.as_u16(),
                 body: response.text().await?,
             }),
-        }
-    }
-}
-
-impl<'a> MessagesRequest<'a> {
-    fn from_completion_request(
-        model: &'a str,
-        max_tokens: u32,
-        request: &CompletionRequest<'a>,
-    ) -> Self {
-        Self {
-            model,
-            max_tokens,
-            system: request.instructions,
-            messages: request.messages.iter().map(MessageParam::from).collect(),
-            tools: request.tools,
         }
     }
 }
@@ -205,11 +231,32 @@ impl<'a> From<&'a ContentBlock> for ContentBlockParam<'a> {
     }
 }
 
+impl From<UsageResponse> for Usage {
+    fn from(usage: UsageResponse) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or_default(),
+            cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or_default(),
+        }
+    }
+}
+
+fn build_system(
+    instructions: &str,
+    cache_control: Option<CacheControl>,
+) -> Vec<SystemBlockParam<'_>> {
+    match instructions.is_empty() {
+        true => Vec::new(),
+        false => vec![SystemBlockParam::Text {
+            text: instructions,
+            cache_control,
+        }],
+    }
+}
+
 fn parse_completion(response: MessagesResponse) -> Result<Completion, Error> {
-    let usage = Usage {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-    };
+    let usage = Usage::from(response.usage);
     let stop_reason = parse_stop_reason(response.stop_reason.as_deref());
     let content = response
         .content
@@ -251,6 +298,10 @@ mod tests {
     use crate::message::ToolResult;
     use serde_json::json;
 
+    fn provider() -> Anthropic {
+        Anthropic::new("model").max_tokens(1)
+    }
+
     #[test]
     fn serializes_tool_blocks_and_tools() {
         let messages = [
@@ -278,12 +329,14 @@ mod tests {
             messages: &messages,
             tools: &tools,
         };
-        let body = MessagesRequest::from_completion_request("model", 1, &request);
+        let provider = provider();
+        let body = provider.messages_request(&request);
         assert_eq!(
             json!(body),
             json!({
                 "model": "model",
                 "max_tokens": 1,
+                "cache_control": { "type": "ephemeral" },
                 "messages": [
                     {
                         "role": "assistant",
@@ -320,8 +373,74 @@ mod tests {
             messages: &[],
             tools: &[],
         };
-        let body = MessagesRequest::from_completion_request("model", 1, &request);
+        let provider = provider();
+        let body = provider.messages_request(&request);
         assert!(json!(body).get("tools").is_none());
+    }
+
+    #[test]
+    fn omits_system_when_instructions_empty() {
+        let request = CompletionRequest {
+            instructions: "",
+            messages: &[],
+            tools: &[],
+        };
+        let provider = provider();
+        let body = provider.messages_request(&request);
+        assert!(json!(body).get("system").is_none());
+    }
+
+    #[test]
+    fn caches_prompt_by_default() {
+        let messages = [Message::user("hi")];
+        let request = CompletionRequest {
+            instructions: "Be brief.",
+            messages: &messages,
+            tools: &[],
+        };
+        let provider = provider();
+        let body = provider.messages_request(&request);
+        assert_eq!(
+            json!(body),
+            json!({
+                "model": "model",
+                "max_tokens": 1,
+                "cache_control": { "type": "ephemeral" },
+                "system": [{
+                    "type": "text",
+                    "text": "Be brief.",
+                    "cache_control": { "type": "ephemeral" }
+                }],
+                "messages": [{
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "hi" }]
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn omits_cache_markers_when_prompt_caching_disabled() {
+        let messages = [Message::user("hi")];
+        let request = CompletionRequest {
+            instructions: "Be brief.",
+            messages: &messages,
+            tools: &[],
+        };
+        let provider = provider().prompt_caching(false);
+        let body = provider.messages_request(&request);
+        assert_eq!(
+            json!(body),
+            json!({
+                "model": "model",
+                "max_tokens": 1,
+                "system": [{ "type": "text", "text": "Be brief." }],
+                "messages": [{
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "hi" }]
+                }]
+            })
+        );
     }
 
     #[test]
@@ -340,12 +459,64 @@ mod tests {
         assert_eq!(completion.stop_reason, StopReason::ToolUse);
         assert_eq!(completion.text(), "checking");
         assert_eq!(
+            completion.usage,
+            Usage {
+                input_tokens: 3,
+                output_tokens: 5,
+                ..Usage::default()
+            }
+        );
+        assert_eq!(
             completion.content[1],
             ContentBlock::ToolUse(ToolUse {
                 id: "toolu_1".to_string(),
                 name: "echo".to_string(),
                 input: json!({ "text": "hi" }),
             })
+        );
+    }
+
+    #[test]
+    fn parses_cache_usage() {
+        let response: MessagesResponse = serde_json::from_value(json!({
+            "content": [{ "type": "text", "text": "hi" }],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 7,
+                "cache_creation_input_tokens": 11
+            }
+        }))
+        .unwrap();
+        let completion = parse_completion(response).unwrap();
+        assert_eq!(
+            completion.usage,
+            Usage {
+                input_tokens: 3,
+                output_tokens: 5,
+                cache_read_input_tokens: 7,
+                cache_creation_input_tokens: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_null_cache_usage_as_zero() {
+        let usage: UsageResponse = serde_json::from_value(json!({
+            "input_tokens": 3,
+            "output_tokens": 5,
+            "cache_read_input_tokens": null,
+            "cache_creation_input_tokens": null
+        }))
+        .unwrap();
+        assert_eq!(
+            Usage::from(usage),
+            Usage {
+                input_tokens: 3,
+                output_tokens: 5,
+                ..Usage::default()
+            }
         );
     }
 }
