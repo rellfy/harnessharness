@@ -1,6 +1,7 @@
 use crate::agent::Agent;
 use crate::error::Error;
 use crate::frontend::Frontend;
+use crate::message::Message;
 use crate::model::Model;
 use crate::retry::RetryPolicy;
 use crate::session::SessionStore;
@@ -16,6 +17,8 @@ use std::sync::Arc;
 
 const DEFAULT_MAX_ITERATIONS: u32 = 50;
 
+pub(crate) type MessageListener = Arc<dyn Fn(&str, &Message) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Harness {
     pub(crate) model: Arc<dyn Model>,
@@ -23,6 +26,7 @@ pub struct Harness {
     pub(crate) retry: RetryPolicy,
     pub(crate) tracer: Arc<BoxedTracer>,
     pub(crate) session_store: Option<Arc<dyn SessionStore>>,
+    pub(crate) message_listener: Option<MessageListener>,
     pub(crate) tools: Arc<[Arc<dyn DynTool>]>,
     pub(crate) tool_specs: Arc<[ToolSpec]>,
     pub(crate) max_iterations: u32,
@@ -35,6 +39,7 @@ pub struct HarnessHarness {
     retry: RetryPolicy,
     tracer: Option<Arc<dyn Tracer>>,
     session_store: Option<Arc<dyn SessionStore>>,
+    message_listener: Option<MessageListener>,
     tools: Vec<Arc<dyn DynTool>>,
     max_iterations: u32,
 }
@@ -100,6 +105,7 @@ impl Default for HarnessHarness {
             retry: RetryPolicy::default(),
             tracer: None,
             session_store: None,
+            message_listener: None,
             tools: Vec::new(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
         }
@@ -133,6 +139,13 @@ impl HarnessHarness {
 
     pub fn session_store(mut self, session_store: impl SessionStore + 'static) -> Self {
         self.session_store = Some(Arc::new(session_store));
+        self
+    }
+
+    /// Observe every message as it is appended to an agent's history.
+    /// The listener receives the agent ID and the message.
+    pub fn on_message(mut self, listener: impl Fn(&str, &Message) + Send + Sync + 'static) -> Self {
+        self.message_listener = Some(Arc::new(listener));
         self
     }
 
@@ -170,6 +183,7 @@ impl HarnessHarness {
             retry: self.retry,
             tracer: Arc::new(tracer),
             session_store: self.session_store,
+            message_listener: self.message_listener,
             tools: Arc::from(self.tools),
             tool_specs,
             max_iterations: self.max_iterations,

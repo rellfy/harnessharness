@@ -107,6 +107,9 @@ impl Agent {
         if let Some(session_store) = &self.harness.session_store {
             session_store.append(&self.id, &message).await?;
         }
+        if let Some(message_listener) = &self.harness.message_listener {
+            message_listener(&self.id, &message);
+        }
         self.messages.push(message);
         Ok(())
     }
@@ -262,6 +265,31 @@ mod tests {
             agent.messages(),
             [Message::user("hi"), Message::assistant("hello")]
         );
+    }
+
+    #[tokio::test]
+    async fn notifies_message_listener_in_order() {
+        let model = ScriptedModel::new([
+            tool_use_completion(&[("a", "echo")]),
+            text_completion("done"),
+        ]);
+        let seen: Arc<Mutex<Vec<(String, Message)>>> = Arc::default();
+        let seen_by_listener = seen.clone();
+        let harness = HarnessHarness::new()
+            .model(model)
+            .tool(Echo)
+            .on_message(move |agent_id, message| {
+                let entry = (agent_id.to_string(), message.clone());
+                seen_by_listener.lock().unwrap().push(entry);
+            })
+            .build()
+            .unwrap();
+        let mut agent = harness.spawn();
+        agent.prompt("go").await.unwrap();
+        let seen = seen.lock().unwrap();
+        let seen_messages: Vec<Message> = seen.iter().map(|(_, message)| message.clone()).collect();
+        assert_eq!(seen_messages, agent.messages());
+        assert!(seen.iter().all(|(agent_id, _)| agent_id == agent.id()));
     }
 
     #[tokio::test]
